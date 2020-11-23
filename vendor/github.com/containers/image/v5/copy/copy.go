@@ -111,6 +111,7 @@ type copier struct {
 	compressionLevel  *int
 	ociDecryptConfig  *encconfig.DecryptConfig
 	ociEncryptConfig  *encconfig.EncryptConfig
+	fetchPartialBlobs bool
 }
 
 // imageCopier tracks state specific to a single image (possibly an item of a manifest list)
@@ -182,6 +183,8 @@ type Options struct {
 	// OciDecryptConfig contains the config that can be used to decrypt an image if it is
 	// encrypted if non-nil. If nil, it does not attempt to decrypt an image.
 	OciDecryptConfig *encconfig.DecryptConfig
+
+	FetchPartialBlobs bool // attempt to fetch the blob partially.  Experimental.
 }
 
 // validateImageListSelection returns an error if the passed-in value is not one that we recognize as a valid ImageListSelection value
@@ -257,9 +260,10 @@ func Image(ctx context.Context, policyContext *signature.PolicyContext, destRef,
 		// FIXME? The cache is used for sources and destinations equally, but we only have a SourceCtx and DestinationCtx.
 		// For now, use DestinationCtx (because blob reuse changes the behavior of the destination side more); eventually
 		// we might want to add a separate CommonCtx — or would that be too confusing?
-		blobInfoCache:    blobinfocache.DefaultCache(options.DestinationCtx),
-		ociDecryptConfig: options.OciDecryptConfig,
-		ociEncryptConfig: options.OciEncryptConfig,
+		blobInfoCache:     blobinfocache.DefaultCache(options.DestinationCtx),
+		ociDecryptConfig:  options.OciDecryptConfig,
+		ociEncryptConfig:  options.OciEncryptConfig,
+		fetchPartialBlobs: options.FetchPartialBlobs,
 	}
 	// Default to using gzip compression unless specified otherwise.
 	if options.DestinationCtx == nil || options.DestinationCtx.CompressionFormat == nil {
@@ -959,9 +963,35 @@ func (c *copier) newProgressPool(ctx context.Context) (*mpb.Progress, func()) {
 	}
 }
 
+// customPartialBlobCounter provides a decorator function for the partial blobs retrieval progress bar
+func customPartialBlobCounter(filler interface{}, wcc ...decor.WC) decor.Decorator {
+	producer := func(filler interface{}) decor.DecorFunc {
+		return func(s decor.Statistics) string {
+			// if the Refill value is set, reverse the bar
+			// so that it looks like ====+++++.
+			if s.Refill > 0 {
+				type revSetter interface {
+					SetReverse(bool)
+				}
+				if t, ok := filler.(revSetter); ok {
+					t.SetReverse(true)
+				}
+			}
+			if s.Total == 0 {
+				pairFmt := "%.1f / %.1f (saved: ------)"
+				return fmt.Sprintf(pairFmt, decor.SizeB1024(s.Current), decor.SizeB1024(s.Total))
+			}
+			pairFmt := "%.1f / %.1f (saved: %.1f = %.2f%%)"
+			percentage := 100.0 * float64(s.Refill) / float64(s.Total)
+			return fmt.Sprintf(pairFmt, decor.SizeB1024(s.Current), decor.SizeB1024(s.Total), decor.SizeB1024(s.Refill), percentage)
+		}
+	}
+	return decor.Any(producer(filler), wcc...)
+}
+
 // createProgressBar creates a mpb.Bar in pool.  Note that if the copier's reportWriter
 // is ioutil.Discard, the progress bar's output will be discarded
-func (c *copier) createProgressBar(pool *mpb.Progress, info types.BlobInfo, kind string, onComplete string) *mpb.Bar {
+func (c *copier) createProgressBar(pool *mpb.Progress, partial bool, info types.BlobInfo, kind string, onComplete string) *mpb.Bar {
 	// shortDigestLen is the length of the digest used for blobs.
 	const shortDigestLen = 12
 
@@ -979,15 +1009,28 @@ func (c *copier) createProgressBar(pool *mpb.Progress, info types.BlobInfo, kind
 	// Otherwise, use a spinner to indicate that something's happening.
 	var bar *mpb.Bar
 	if info.Size > 0 {
-		bar = pool.AddBar(info.Size,
-			mpb.BarFillerClearOnComplete(),
-			mpb.PrependDecorators(
-				decor.OnComplete(decor.Name(prefix), onComplete),
-			),
-			mpb.AppendDecorators(
-				decor.OnComplete(decor.CountersKibiByte("%.1f / %.1f"), ""),
-			),
-		)
+		if partial {
+			filler := mpb.NewBarFiller(mpb.DefaultBarStyle, false)
+			bar = pool.Add(info.Size,
+				filler,
+				mpb.PrependDecorators(
+					decor.OnComplete(decor.Name(prefix), onComplete),
+				),
+				mpb.AppendDecorators(
+					customPartialBlobCounter(filler),
+				),
+			)
+		} else {
+			bar = pool.AddBar(info.Size,
+				mpb.BarFillerClearOnComplete(),
+				mpb.PrependDecorators(
+					decor.OnComplete(decor.Name(prefix), onComplete),
+				),
+				mpb.AppendDecorators(
+					decor.OnComplete(decor.CountersKibiByte("%.1f / %.1f"), ""),
+				),
+			)
+		}
 	} else {
 		bar = pool.AddSpinner(info.Size,
 			mpb.SpinnerOnLeft,
@@ -1016,7 +1059,7 @@ func (c *copier) copyConfig(ctx context.Context, src types.Image) error {
 		destInfo, err := func() (types.BlobInfo, error) { // A scope for defer
 			progressPool, progressCleanup := c.newProgressPool(ctx)
 			defer progressCleanup()
-			bar := c.createProgressBar(progressPool, srcInfo, "config", "done")
+			bar := c.createProgressBar(progressPool, false, srcInfo, "config", "done")
 			destInfo, err := c.copyBlobFromStream(ctx, bytes.NewReader(configBlob), srcInfo, nil, false, true, false, bar)
 			if err != nil {
 				return types.BlobInfo{}, err
@@ -1041,6 +1084,23 @@ type diffIDResult struct {
 	err    error
 }
 
+type imageSourceSeekableProxy struct {
+	source   types.ImageSourceSeekable
+	progress chan int64
+}
+
+func (s imageSourceSeekableProxy) GetBlobAt(ctx context.Context, bInfo types.BlobInfo, chunks []types.ImageSourceChunk) (io.ReadCloser, string, error) {
+	rc, contentType, err := s.source.GetBlobAt(ctx, bInfo, chunks)
+	if err == nil {
+		total := int64(0)
+		for _, c := range chunks {
+			total += int64(c.Length)
+		}
+		s.progress <- total
+	}
+	return rc, contentType, err
+}
+
 // copyLayer copies a layer with srcInfo (with known Digest and Annotations and possibly known Size) in src to dest, perhaps compressing it if canCompress,
 // and returns a complete blobInfo of the copied layer, and a value for LayerDiffIDs if diffIDIsNeeded
 func (ic *imageCopier) copyLayer(ctx context.Context, srcInfo types.BlobInfo, toEncrypt bool, pool *mpb.Progress) (types.BlobInfo, digest.Digest, error) {
@@ -1048,15 +1108,21 @@ func (ic *imageCopier) copyLayer(ctx context.Context, srcInfo types.BlobInfo, to
 	// Diffs are needed if we are encrypting an image or trying to decrypt an image
 	diffIDIsNeeded := ic.diffIDsAreNeeded && cachedDiffID == "" || toEncrypt || (isOciEncrypted(srcInfo.MediaType) && ic.c.ociDecryptConfig != nil)
 
+	srcAlgo := ""
+	if srcInfo.CompressionAlgorithm != nil {
+		srcAlgo = srcInfo.CompressionAlgorithm.Name()
+	}
 	// If we already have the blob, and we don't need to compute the diffID, then we don't need to read it from the source.
-	if !diffIDIsNeeded {
+	mustRecompress := srcInfo.CompressionOperation != types.PreserveOriginal || srcAlgo != ic.c.compressionFormat.Name()
+	if !diffIDIsNeeded && !mustRecompress {
 		reused, blobInfo, err := ic.c.dest.TryReusingBlob(ctx, srcInfo, ic.c.blobInfoCache, ic.canSubstituteBlobs)
 		if err != nil {
 			return types.BlobInfo{}, "", errors.Wrapf(err, "Error trying to reuse blob %s at destination", srcInfo.Digest)
 		}
+
 		if reused {
 			logrus.Debugf("Skipping blob %s (already present):", srcInfo.Digest)
-			bar := ic.c.createProgressBar(pool, srcInfo, "blob", "skipped: already exists")
+			bar := ic.c.createProgressBar(pool, false, srcInfo, "blob", "skipped: already exists")
 			bar.SetTotal(0, true)
 
 			// Throw an event that the layer has been skipped
@@ -1070,6 +1136,44 @@ func (ic *imageCopier) copyLayer(ctx context.Context, srcInfo types.BlobInfo, to
 		}
 	}
 
+	imgSource, okSource := ic.c.rawSource.(types.ImageSourceSeekable)
+	imgDest, okDest := ic.c.dest.(types.ImageDestinationPartial)
+	if ic.c.fetchPartialBlobs && okSource && okDest && !diffIDIsNeeded {
+		bar := ic.c.createProgressBar(pool, true, srcInfo, "blob", "done")
+
+		progress := make(chan int64)
+		terminate := make(chan interface{})
+
+		defer close(terminate)
+		defer close(progress)
+
+		proxy := imageSourceSeekableProxy{
+			source:   imgSource,
+			progress: progress,
+		}
+		go func() {
+			for {
+				select {
+				case written := <-progress:
+					bar.IncrInt64(written)
+				case <-terminate:
+					return
+				}
+			}
+
+		}()
+
+		bar.SetTotal(srcInfo.Size, false)
+		info, err := imgDest.PutBlobPartial(ctx, proxy, srcInfo, ic.c.blobInfoCache)
+		if err == nil {
+			bar.SetRefill(srcInfo.Size - bar.Current())
+			bar.SetTotal(srcInfo.Size, true)
+			logrus.Debugf("Retrieved partial blob %v", srcInfo.Digest)
+			return info, cachedDiffID, nil
+		}
+		logrus.Errorf("Failed to retrieve partial blob: %v", err)
+	}
+
 	// Fallback: copy the layer, computing the diffID if we need to do so
 	srcStream, srcBlobSize, err := ic.c.rawSource.GetBlob(ctx, srcInfo, ic.c.blobInfoCache)
 	if err != nil {
@@ -1077,7 +1181,7 @@ func (ic *imageCopier) copyLayer(ctx context.Context, srcInfo types.BlobInfo, to
 	}
 	defer srcStream.Close()
 
-	bar := ic.c.createProgressBar(pool, srcInfo, "blob", "done")
+	bar := ic.c.createProgressBar(pool, false, srcInfo, "blob", "done")
 
 	blobInfo, diffIDChan, err := ic.copyLayerFromStream(ctx, srcStream, types.BlobInfo{Digest: srcInfo.Digest, Size: srcBlobSize, MediaType: srcInfo.MediaType, Annotations: srcInfo.Annotations}, diffIDIsNeeded, toEncrypt, bar)
 	if err != nil {
@@ -1426,7 +1530,9 @@ func (c *copier) compressGoroutine(dest *io.PipeWriter, src io.Reader, compressi
 	if err != nil {
 		return
 	}
-	defer compressor.Close()
+	defer func() {
+		err = compressor.Close()
+	}()
 
 	buf := make([]byte, compressionBufferSize)
 

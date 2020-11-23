@@ -27,12 +27,15 @@ var (
 	Xz = internal.NewAlgorithm("Xz", []byte{0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00}, XzDecompressor, xzCompressor)
 	// Zstd compression.
 	Zstd = internal.NewAlgorithm("zstd", []byte{0x28, 0xb5, 0x2f, 0xfd}, ZstdDecompressor, zstdCompressor)
+	// Zstd compression.
+	ChunkedZstd = internal.NewAlgorithm("zstd:chunked", []byte{0x28, 0xb5, 0x2f, 0xfd}, ZstdDecompressor, chunkedZstdCompressor)
 
 	compressionAlgorithms = map[string]Algorithm{
-		Gzip.Name():  Gzip,
-		Bzip2.Name(): Bzip2,
-		Xz.Name():    Xz,
-		Zstd.Name():  Zstd,
+		Gzip.Name():        Gzip,
+		Bzip2.Name():       Bzip2,
+		Xz.Name():          Xz,
+		Zstd.Name():        Zstd,
+		ChunkedZstd.Name(): ChunkedZstd,
 	}
 )
 

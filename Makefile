@@ -103,8 +103,8 @@ install.tools:
 
 .PHONY: runc
 runc: gopath
-	rm -rf ../../opencontainers/runc
-	git clone https://github.com/opencontainers/runc ../../opencontainers/runc
+	#rm -rf ../../opencontainers/runc
+	#git clone https://github.com/opencontainers/runc ../../opencontainers/runc
 	cd ../../opencontainers/runc && git checkout $(RUNC_COMMIT) && $(GO) build -tags "$(STORAGETAGS) $(SECURITYTAGS)"
 	ln -sf ../../opencontainers/runc/runc
 

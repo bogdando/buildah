@@ -1155,11 +1155,72 @@ func (f fileGetNilCloser) Close() error {
 	return nil
 }
 
+func (d *Driver) getStagingDir() string {
+	return filepath.Join(d.home, "staging")
+}
+
 // DiffGetter returns a FileGetCloser that can read files from the directory that
 // contains files for the layer differences. Used for direct access for tar-split.
 func (d *Driver) DiffGetter(id string) (graphdriver.FileGetCloser, error) {
 	p := d.getDiffPath(id)
 	return fileGetNilCloser{storage.NewPathFileGetter(p)}, nil
+}
+
+// ApplyDiff applies the changes in the new layer using the specified function
+func (d *Driver) ApplyDiffWithDiffer(id, parent string, options *graphdriver.ApplyDiffOpts, data interface{}, differ graphdriver.DifferFunction) (output graphdriver.DriverWithDifferOutput, err error) {
+	var idMappings *idtools.IDMappings
+	if options != nil {
+		idMappings = options.Mappings
+	}
+	if idMappings == nil {
+		idMappings = &idtools.IDMappings{}
+	}
+
+	applyDir := ""
+
+	if id == "" {
+		err := os.MkdirAll(d.getStagingDir(), 0700)
+		if err != nil && !os.IsExist(err) {
+			return graphdriver.DriverWithDifferOutput{}, err
+		}
+		applyDir, err = ioutil.TempDir(d.getStagingDir(), "")
+		if err != nil {
+			return graphdriver.DriverWithDifferOutput{}, err
+		}
+
+	} else {
+		applyDir = d.getDiffPath(id)
+	}
+
+	logrus.Debugf("Applying differ in %s", applyDir)
+
+	out, err := differ(data, applyDir, &archive.TarOptions{
+		UIDMaps:           idMappings.UIDs(),
+		GIDMaps:           idMappings.GIDs(),
+		IgnoreChownErrors: d.options.ignoreChownErrors,
+		WhiteoutFormat:    d.getWhiteoutFormat(),
+		InUserNS:          rsystem.RunningInUserNS(),
+	})
+	out.Target = applyDir
+	return out, err
+}
+
+// ApplyDiffFromStagingDirectory applies the changes using the specified staging directory.
+func (d *Driver) ApplyDiffFromStagingDirectory(id, parent, stagingDirectory string, diffOutput *graphdriver.DriverWithDifferOutput, options *graphdriver.ApplyDiffOpts) error {
+	if filepath.Dir(stagingDirectory) != d.getStagingDir() {
+		return fmt.Errorf("%q is not a staging directory", stagingDirectory)
+	}
+
+	diff := d.getDiffPath(id)
+	if err := os.RemoveAll(diff); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(stagingDirectory, diff)
+}
+
+// DifferTarget gets the location where files are stored for the layer.
+func (d *Driver) DifferTarget(id string) (string, error) {
+	return d.getDiffPath(id), nil
 }
 
 // ApplyDiff applies the new layer into a root

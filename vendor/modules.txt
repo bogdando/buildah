@@ -68,7 +68,7 @@ github.com/containers/common/pkg/seccomp
 github.com/containers/common/pkg/subscriptions
 github.com/containers/common/pkg/umask
 github.com/containers/common/version
-# github.com/containers/image/v5 v5.8.1
+# github.com/containers/image/v5 v5.8.1 => /home/bogdando/go/src/github.com/giuseppe/image
 github.com/containers/image/v5/copy
 github.com/containers/image/v5/directory
 github.com/containers/image/v5/directory/explicitfilepath
@@ -125,7 +125,7 @@ github.com/containers/ocicrypt/keywrap/pgp
 github.com/containers/ocicrypt/keywrap/pkcs7
 github.com/containers/ocicrypt/spec
 github.com/containers/ocicrypt/utils
-# github.com/containers/storage v1.24.1
+# github.com/containers/storage v1.24.1 => /home/bogdando/go/src/github.com/giuseppe/storage
 github.com/containers/storage
 github.com/containers/storage/drivers
 github.com/containers/storage/drivers/aufs
@@ -168,6 +168,8 @@ github.com/containers/storage/pkg/truncindex
 github.com/containers/storage/pkg/unshare
 # github.com/coreos/go-systemd/v22 v22.0.0
 github.com/coreos/go-systemd/v22/dbus
+# github.com/cyphar/filepath-securejoin v0.2.2
+github.com/cyphar/filepath-securejoin
 # github.com/davecgh/go-spew v1.1.1
 github.com/davecgh/go-spew/spew
 # github.com/docker/distribution v2.7.1+incompatible

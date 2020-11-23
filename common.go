@@ -44,6 +44,7 @@ func getCopyOptions(store storage.Store, reportWriter io.Writer, sourceSystemCon
 		OciEncryptConfig:      ociEncryptConfig,
 		OciDecryptConfig:      ociDecryptConfig,
 		OciEncryptLayers:      ociEncryptLayers,
+		FetchPartialBlobs:     true,
 	}
 }
 

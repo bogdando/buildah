@@ -20,8 +20,10 @@ import (
 	"github.com/containers/image/v5/internal/tmpdir"
 	"github.com/containers/image/v5/manifest"
 	"github.com/containers/image/v5/pkg/blobinfocache/none"
+	"github.com/containers/image/v5/pkg/compression"
 	"github.com/containers/image/v5/types"
 	"github.com/containers/storage"
+	"github.com/containers/storage/drivers"
 	"github.com/containers/storage/pkg/archive"
 	"github.com/containers/storage/pkg/ioutils"
 	digest "github.com/opencontainers/go-digest"
@@ -65,6 +67,12 @@ type storageImageDestination struct {
 	filenames       map[digest.Digest]string        // Mapping from layer blobsums to names of files we used to hold them
 	SignatureSizes  []int                           `json:"signature-sizes,omitempty"`  // List of sizes of each signature slice
 	SignaturesSizes map[digest.Digest][]int         `json:"signatures-sizes,omitempty"` // Sizes of each manifest's signature slice
+
+	LayersMetadata map[string][]compression.FileMetadata
+	LayersTarget   map[string]string
+
+	diffOutputs   map[digest.Digest]*graphdriver.DriverWithDifferOutput
+	diffManifests map[digest.Digest]string
 }
 
 type storageImageCloser struct {
@@ -356,6 +364,8 @@ func newImageDestination(sys *types.SystemContext, imageRef storageReference) (*
 		filenames:       make(map[digest.Digest]string),
 		SignatureSizes:  []int{},
 		SignaturesSizes: make(map[digest.Digest][]int),
+		diffOutputs:     make(map[digest.Digest]*graphdriver.DriverWithDifferOutput),
+		diffManifests:   make(map[digest.Digest]string),
 	}
 	return image, nil
 }
@@ -368,6 +378,12 @@ func (s *storageImageDestination) Reference() types.ImageReference {
 
 // Close cleans up the temporary directory.
 func (s *storageImageDestination) Close() error {
+	for _, v := range s.diffOutputs {
+		if v.Target != "" {
+			os.RemoveAll(v.Target)
+		}
+	}
+
 	return os.RemoveAll(s.directory)
 }
 
@@ -457,6 +473,118 @@ func (s *storageImageDestination) PutBlob(ctx context.Context, stream io.Reader,
 		Size:      blobSize,
 		MediaType: blobinfo.MediaType,
 	}, nil
+}
+
+type seekableToReaderAt struct {
+	stream  types.ImageSourceSeekable
+	srcInfo types.BlobInfo
+	ctx     context.Context
+}
+
+func (s *seekableToReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
+	chunk := types.ImageSourceChunk{
+		Offset: uint64(off),
+		Length: uint64(len(p)),
+	}
+	reader, _, err := s.stream.GetBlobAt(s.ctx, s.srcInfo, []types.ImageSourceChunk{chunk})
+	if err != nil {
+		return 0, err
+	}
+	defer reader.Close()
+
+	total := 0
+	for {
+		n, err := reader.Read(p[total:])
+		if err != nil && err != io.EOF {
+			return 0, err
+		}
+		total += n
+		if err == io.EOF || total == len(p) {
+			break
+		}
+	}
+	return total, nil
+}
+
+func (s *storageImageDestination) getLayersCache() (map[string][]compression.FileMetadata, map[string]string, error) {
+	s.putBlobMutex.Lock()
+	defer s.putBlobMutex.Unlock()
+
+	if s.LayersMetadata != nil {
+		return s.LayersMetadata, s.LayersTarget, nil
+	}
+
+	allLayers, err := s.imageRef.transport.store.Layers()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	layersMetadata := make(map[string][]compression.FileMetadata)
+	layersTarget := make(map[string]string)
+	for _, r := range allLayers {
+		if r.Metadata == "" {
+			continue
+		}
+		var metadataLayer []compression.FileMetadata
+		if err := json.Unmarshal([]byte(r.Metadata), &metadataLayer); err != nil {
+			continue
+		}
+		layersMetadata[r.ID] = metadataLayer
+		target, err := s.imageRef.transport.store.DifferTarget(r.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		layersTarget[r.ID] = target
+	}
+	s.LayersMetadata = layersMetadata
+	s.LayersTarget = layersTarget
+
+	return layersMetadata, layersTarget, nil
+}
+
+func (s *storageImageDestination) PutBlobPartial(ctx context.Context, stream types.ImageSourceSeekable, srcInfo types.BlobInfo, cache types.BlobInfoCache) (types.BlobInfo, error) {
+	blobDigest := srcInfo.Digest
+
+	readerAt := seekableToReaderAt{
+		stream:  stream,
+		srcInfo: srcInfo,
+		ctx:     ctx,
+	}
+
+	data, err := compression.ReadChunkedZstdManifest(&readerAt, srcInfo.Size)
+	if err != nil {
+		return srcInfo, err
+	}
+
+	layersMetadata, layersTarget, err := s.getLayersCache()
+	if err != nil {
+		return srcInfo, err
+	}
+
+	input := DirectDiffInput{
+		stream:         stream,
+		store:          s,
+		manifest:       data,
+		ctx:            ctx,
+		srcInfo:        srcInfo,
+		layersMetadata: layersMetadata,
+		layersTarget:   layersTarget,
+	}
+
+	out, err := s.imageRef.transport.store.ApplyDiffWithDiffer("", nil, &input, chunkedZstdDiffer)
+	if err != nil {
+		return srcInfo, err
+	}
+
+	s.putBlobMutex.Lock()
+	s.blobDiffIDs[blobDigest] = blobDigest
+	s.fileSizes[blobDigest] = 0
+	s.filenames[blobDigest] = ""
+	s.diffOutputs[blobDigest] = out
+	s.diffManifests[blobDigest] = string(data)
+	s.putBlobMutex.Unlock()
+
+	return srcInfo, nil
 }
 
 // TryReusingBlob checks whether the transport already contains, or can efficiently reuse, a blob, and if so, applies it to the current destination
@@ -682,6 +810,31 @@ func (s *storageImageDestination) Commit(ctx context.Context, unparsedToplevel t
 			lastLayer = layer.ID
 			continue
 		}
+
+		if diffOutput := s.diffOutputs[blob.Digest]; diffOutput != nil {
+			layer, err := s.imageRef.transport.store.CreateLayer(id, lastLayer, nil, "", false, nil)
+			if err != nil {
+				return err
+			}
+
+			// FIXME: what to do with the uncompressed digest?
+			diffOutput.UncompressedDigest = blob.Digest
+
+			if err := s.imageRef.transport.store.ApplyDiffFromStagingDirectory(layer.ID, diffOutput.Target, diffOutput, nil); err != nil {
+				s.imageRef.transport.store.Delete(layer.ID)
+				return err
+			}
+
+			manifest := s.diffManifests[blob.Digest]
+
+			if err := s.imageRef.transport.store.SetMetadata(layer.ID, string(manifest)); err != nil {
+				s.imageRef.transport.store.Delete(layer.ID)
+				return errors.Wrapf(err, "error applying diff for layer with blob %q", blob.Digest)
+			}
+			lastLayer = layer.ID
+			continue
+		}
+
 		// Check if we previously cached a file with that blob's contents.  If we didn't,
 		// then we need to read the desired contents from a layer.
 		filename, ok := s.filenames[blob.Digest]

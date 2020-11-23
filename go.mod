@@ -45,3 +45,7 @@ require (
 )
 
 replace github.com/sirupsen/logrus => github.com/sirupsen/logrus v1.4.2
+
+replace github.com/containers/storage => /home/bogdando/go/src/github.com/giuseppe/storage
+
+replace github.com/containers/image/v5 => /home/bogdando/go/src/github.com/giuseppe/image

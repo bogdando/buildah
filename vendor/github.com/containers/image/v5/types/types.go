@@ -331,6 +331,24 @@ type ImageDestination interface {
 	Commit(ctx context.Context, unparsedToplevel UnparsedImage) error
 }
 
+// ImageSourceChunk is a portion of a blob.
+type ImageSourceChunk struct {
+	Offset uint64
+	Length uint64
+}
+
+// ImageSourceSeekable is an image source that permits to fetch chunks of the entire blob.
+type ImageSourceSeekable interface {
+	// GetBlobAt returns a stream for the specified blob.
+	GetBlobAt(context.Context, BlobInfo, []ImageSourceChunk) (io.ReadCloser, string, error)
+}
+
+// ImageDestinationPartial is a service to store a blob by requesting the missing chunks to a ImageSourceSeekable.
+type ImageDestinationPartial interface {
+	// PutBlobPartial writes contents of stream and returns data representing the result.
+	PutBlobPartial(ctx context.Context, stream ImageSourceSeekable, srcInfo BlobInfo, cache BlobInfoCache) (BlobInfo, error)
+}
+
 // ManifestTypeRejectedError is returned by ImageDestination.PutManifest if the destination is in principle available,
 // refuses specifically this manifest type, but may accept a different manifest type.
 type ManifestTypeRejectedError struct { // We only use a struct to allow a type assertion, without limiting the contents of the error otherwise.

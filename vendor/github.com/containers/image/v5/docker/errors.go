@@ -17,6 +17,14 @@ var (
 	ErrTooManyRequests = errors.New("too many requests to registry")
 )
 
+// ErrBadRequest is returned when the status code returned is 400
+type ErrBadRequest struct {
+}
+
+func (e ErrBadRequest) Error() string {
+	return fmt.Sprintf("http bad request")
+}
+
 // ErrUnauthorizedForCredentials is returned when the status code returned is 401
 type ErrUnauthorizedForCredentials struct { // We only use a struct to allow a type assertion, without limiting the contents of the error otherwise.
 	Err error
@@ -32,11 +40,15 @@ func httpResponseToError(res *http.Response, context string) error {
 	switch res.StatusCode {
 	case http.StatusOK:
 		return nil
+	case http.StatusPartialContent:
+		return nil
 	case http.StatusTooManyRequests:
 		return ErrTooManyRequests
 	case http.StatusUnauthorized:
 		err := client.HandleErrorResponse(res)
 		return ErrUnauthorizedForCredentials{Err: err}
+	case http.StatusBadRequest:
+		return ErrBadRequest{}
 	default:
 		if context != "" {
 			context = context + ": "
