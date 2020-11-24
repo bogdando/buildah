@@ -15,6 +15,7 @@ require (
 	github.com/fsouza/go-dockerclient v1.6.6
 	github.com/ghodss/yaml v1.0.0
 	github.com/hashicorp/go-multierror v1.1.0
+	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/ishidawataru/sctp v0.0.0-20191218070446-00ab2ac2db07 // indirect
 	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
 	github.com/mattn/go-shellwords v1.0.10
@@ -39,7 +40,8 @@ require (
 	go.etcd.io/bbolt v1.3.5
 	golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9
 	golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a
-	golang.org/x/sys v0.0.0-20201018230417-eeed37f84f13
+	golang.org/x/sys v0.0.0-20201119102817-f84b799fce68
+	golang.org/x/text v0.3.4 // indirect
 	gotest.tools/v3 v3.0.3 // indirect
 	k8s.io/klog v1.0.0 // indirect
 )
