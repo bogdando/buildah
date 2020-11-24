@@ -473,6 +473,13 @@ cat /etc/containers/policy.json
 }
 ```
 
+## Debug with Delve
+
+In order to make a debug build without optimizations, use:
+```
+make debug
+```
+
 ## Vendoring
 
 Buildah uses Go Modules for vendoring purposes.  If you need to update or add a vendored package into Buildah, please follow this procedure:
